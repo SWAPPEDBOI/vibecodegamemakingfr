@@ -7,18 +7,25 @@ const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
 const screenW = 1920, screenH = 1080, centerX = 960, centerY = 540;
 // 총알 충돌 반지름, 다중발사 각도(10도), 퍼크 카드 위치와 크기
 const bulletRadius = 22, spreadAngle = Math.PI / 18, cardLeft = 330, cardStep = 420, cardTop = 420, cardW = 360, cardH = 240;
-// 운석 속도 배율, 생성 간격(프레임): 시작값 / 프레임마다 줄어드는 양 / 최소값 / 페이즈 상승 때 곱하는 값
-const rockSpeedScale = 1.05, startSpawnDelay = 150, delayDecrease = 0.02, minSpawnDelay = 30, phaseDelayScale = 0.8;
-// 운석 종류 (sides: 꼭짓점 수, hitDamage: 플레이어에게 닿을 때 깎는 HP, knock: 맞았을 때 밀리는 세기)
+// 운석 속도 배율 (실제 이동 속도 px/프레임 = speed x 배율)
+// 생성 간격(프레임): 시작값 / 프레임마다 줄어드는 양(60에서 20까지 약 100초) / 최소값 / 페이즈 상승 때 곱하는 값
+const rockSpeedScale = 2, startSpawnDelay = 60, delayDecrease = 0.0067, minSpawnDelay = 20, phaseDelayScale = 0.8;
+// 운석 종류 (최종 속도 px/프레임: 4각 4.2, 5각 4.0, 6각 2.0, 7각 1.6, 8각 1.2)
+// (sides: 꼭짓점 수, hitDamage: 플레이어에게 닿을 때 깎는 HP, knock: 맞았을 때 밀리는 세기)
 const rockTypes = [
-  { sides: 4, hp: 1, speed: 4, exp: 10, radius: 30, hitDamage: 10, knock: 14, color: "#FFFF00" },
+  { sides: 4, hp: 1, speed: 2.1, exp: 10, radius: 30, hitDamage: 10, knock: 14, color: "#FFFF00" },
   { sides: 5, hp: 3, speed: 2, exp: 25, radius: 44, hitDamage: 20, knock: 8, color: "#FFD700" },
   { sides: 6, hp: 5, speed: 1, exp: 50, radius: 60, hitDamage: 35, knock: 4, color: "#FFA500" },
   { sides: 7, hp: 8, speed: 0.8, exp: 90, radius: 68, hitDamage: 50, knock: 3, color: "#E02020" },
   { sides: 8, hp: 12, speed: 0.6, exp: 140, radius: 76, hitDamage: 70, knock: 2, color: "#9932CC" }
 ];
-// 페이즈별 생성 비율(%) [4각, 5각, 6각, 7각, 8각] (합계 100, 7각은 페이즈 2부터, 8각은 페이즈 3부터)
-const phaseRatios = [[60, 30, 10, 0, 0], [35, 35, 20, 10, 0], [20, 30, 25, 15, 10]];
+// 후반 강화: 이 페이즈부터 페이즈마다 체력/exp +8%, 속도 +1% (속도는 최대 1.5배)
+const lateStartPhase = 9, lateHpBonus = 0.08, lateSpeedBonus = 0.01, maxLateSpeed = 1.5;
+// 페이즈에 따른 종류별 생성 가중치 [4각, 5각, 6각, 7각, 8각] (합이 아니라 비율이므로 뽑을 때 합으로 나눔)
+function rockWeights() {
+  const p = phase - 1;
+  return [Math.max(5, 60 * Math.pow(0.6, p)), 30 + 2 * p, 10 + 5 * p, phase >= 2 ? 7 * p : 0, phase >= 3 ? 8 * (p - 1) : 0];
+}
 // 퍼크 목록 (max: 최대 레벨, 0이면 제한 없음 / level: 지금 레벨 / apply(lv): 선택했을 때 능력 변경)
 const perks = [
   { name: "공격력", desc: "데미지 +1", max: 5, level: 0, apply: function (lv) { damage += 1; } },
@@ -26,13 +33,18 @@ const perks = [
   { name: "탄속", desc: "탄 속도 +5", max: 5, level: 0, apply: function (lv) { bulletSpeed += 5; } },
   { name: "관통", desc: "탄이 적을 관통", max: 1, level: 0, apply: function (lv) { pierce = true; } },
   { name: "다중발사", desc: "좌우 10도 추가 발사", max: 5, level: 0, apply: function (lv) { multiLevel += 1; } },
-  { name: "적응 사격", desc: "근처 운석을 유도", max: 5, level: 0, apply: function (lv) { homingRange = 200 + 100 * lv; homingTurn = 0.03 + 0.02 * lv; } },
+  { name: "적응 사격", desc: "근처 운석을 유도", max: 5, level: 0, apply: function (lv) { homingRange = 150 + 50 * lv; homingTurn = 0.03 + 0.02 * lv; } },
   { name: "탄 크기", desc: "탄 크기 +20%", max: 5, level: 0, apply: function (lv) { bulletScale = 1 + 0.2 * lv; } },
   { name: "충격 강화", desc: "넉백 +40%", max: 5, level: 0, apply: function (lv) { knockScale = 1 + 0.4 * lv; } },
   { name: "치명타", desc: "확률 +10%, 2배 데미지", max: 5, level: 0, apply: function (lv) { critChance = 0.1 * lv; } },
   { name: "장갑", desc: "받는 피해 -12%", max: 5, level: 0, apply: function (lv) { armor = 0.12 * lv; } },
   { name: "경험치 획득", desc: "획득 exp +20%", max: 5, level: 0, apply: function (lv) { expScale = 1 + 0.2 * lv; } },
   { name: "최대 체력", desc: "최대 HP +20 (회복)", max: 5, level: 0, apply: function (lv) { maxHp += 20; hp += 20; } },
+  { name: "생명 흡수", desc: "파괴마다 HP +2", max: 5, level: 0, apply: function (lv) { lifeSteal = 2 * lv; } },
+  { name: "자동 재생", desc: "초당 HP +1", max: 5, level: 0, apply: function (lv) { regen = lv; } },
+  { name: "폭발탄", desc: "주변 운석에 피해 1", max: 5, level: 0, apply: function (lv) { explodeRadius = 80 + 20 * lv; } },
+  { name: "둔화탄", desc: "맞은 운석 감속", max: 5, level: 0, apply: function (lv) { slowScale = Math.max(0.4, 1 - 0.15 * lv); } },
+  { name: "방어막", desc: "충돌 1회 막기", max: 5, level: 0, apply: function (lv) { shieldRecharge = (25 - 4 * lv) * 60; if (lv == 1) shieldOn = true; } },
   { name: "응급 수리", desc: "즉시 HP +30", max: 0, level: 0, apply: function (lv) { hp = Math.min(maxHp, hp + 30); } }
 ];
 // 게임 상태 변수
@@ -41,23 +53,34 @@ let hp, maxHp, exp, level, kills, phase, frame, shootTimer, spawnDelay, spawnTim
 let mouseX = centerX, mouseY = 0, mouseDown = false, aimAngle = 0, paused = false, gameOver = false, userPaused = false;
 // 퍼크로 바뀌는 능력치
 let damage, fireDelay, bulletSpeed, pierce, multiLevel, homingRange, homingTurn, bulletScale, knockScale, critChance, armor, expScale;
+let lifeSteal, regen, explodeRadius, slowScale, shieldRecharge, shieldOn, shieldTimer;
 // 게임 처음 상태로 되돌리기 (퍼크 레벨도 0으로)
 function resetGame() {
-  maxHp = 100; hp = maxHp; exp = 0; level = 1; kills = 0; phase = 1; frame = 0; shootTimer = 0; spawnDelay = startSpawnDelay; spawnTimer = spawnDelay;
+  maxHp = 200; hp = maxHp; exp = 0; level = 1; kills = 0; phase = 1; frame = 0; shootTimer = 0; spawnDelay = startSpawnDelay; spawnTimer = spawnDelay;
   enemies = []; bullets = []; particles = []; paused = false; gameOver = false; userPaused = false;
   damage = 1; fireDelay = 20; bulletSpeed = 22; pierce = false; multiLevel = 0; homingRange = 0; homingTurn = 0;
   bulletScale = 1; knockScale = 1; critChance = 0; armor = 0; expScale = 1;
+  lifeSteal = 0; regen = 0; explodeRadius = 0; slowScale = 1; shieldRecharge = 0; shieldOn = false; shieldTimer = 0;
   for (let i = 0; i < perks.length; i++) perks[i].level = 0;
 }
 // 별 50개 만들기
 for (let i = 0; i < 50; i++) stars.push({ x: Math.random() * screenW, y: Math.random() * screenH });
 // 레벨에 필요한 경험치 (Lv1 100, Lv2 200, Lv3 350, 그 뒤로 +150씩)
 function needExp() { return level <= 3 ? [100, 200, 350][level - 1] : 350 + 150 * (level - 3); }
+// 초반(플레이어 레벨 3 이하)에 후보로 나올 수 있는 퍼크 이름
+const earlyPerks = ["공격력", "연사속도", "탄속", "관통", "탄 크기", "치명타", "다중발사"], earlyLevelLimit = 3;
 // 레벨업: 게임을 멈추고 퍼크 3개를 무작위로 고르기 (최대 레벨인 퍼크는 후보에서 제외, 응급 수리는 항상 후보)
 function startLevelUp() {
+  const oldLevel = level;
   exp -= needExp(); level += 1; paused = true;
-  const pool = []; choices = [];
-  for (let i = 0; i < perks.length; i++) if (perks[i].max == 0 || perks[i].level < perks[i].max) pool.push(perks[i]);
+  const pool = [], others = []; choices = [];
+  for (let i = 0; i < perks.length; i++) {
+    if (perks[i].max == 0 || perks[i].level < perks[i].max) {
+      if (oldLevel <= earlyLevelLimit && earlyPerks.indexOf(perks[i].name) < 0) others.push(perks[i]); else pool.push(perks[i]);
+    }
+  }
+  // 초반 후보가 3개 미만이면 나머지 퍼크에서 부족한 만큼 채우기
+  while (pool.length < 3 && others.length > 0) pool.push(others.splice(Math.floor(Math.random() * others.length), 1)[0]);
   for (let i = 0; i < 3 && pool.length > 0; i++) choices.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
 }
 // 퍼크 선택하기 (0, 1, 2): 레벨을 올리고 능력 적용
@@ -67,14 +90,19 @@ function choosePerk(index) {
   perk.level += 1; perk.apply(perk.level); paused = false;
   if (exp >= needExp()) startLevelUp();
 }
-// 운석 만들기 (화면 밖 사방에서 생성, 페이즈 비율표로 종류 고르기, maxHp는 시작 체력)
+// 운석 만들기 (화면 밖 사방에서 생성, 가중치를 합으로 나눠 종류 고르기, 후반 페이즈는 체력/exp/속도 강화)
 function spawnEnemy() {
-  const ratio = phaseRatios[phase - 1];
-  let dice = Math.random() * 100, typeIndex = 0;
-  while (typeIndex < ratio.length - 1 && dice >= ratio[typeIndex]) { dice -= ratio[typeIndex]; typeIndex += 1; }
+  const weights = rockWeights();
+  let total = 0, typeIndex = 0;
+  for (let i = 0; i < weights.length; i++) total += weights[i];
+  let dice = Math.random() * total;
+  while (typeIndex < weights.length - 1 && dice >= weights[typeIndex]) { dice -= weights[typeIndex]; typeIndex += 1; }
   const type = rockTypes[typeIndex], angle = Math.random() * Math.PI * 2;
-  enemies.push({ x: centerX + Math.cos(angle) * 1200, y: centerY + Math.sin(angle) * 1200, hp: type.hp, maxHp: type.hp, type: type,
-    vx: -Math.cos(angle) * type.speed * rockSpeedScale, vy: -Math.sin(angle) * type.speed * rockSpeedScale, knockX: 0, knockY: 0 });
+  const late = Math.max(0, phase - lateStartPhase + 1), hpScale = 1 + lateHpBonus * late;
+  const speed = type.speed * rockSpeedScale * Math.min(maxLateSpeed, 1 + lateSpeedBonus * late);
+  const enemyHp = Math.ceil(type.hp * hpScale - 0.0001);
+  enemies.push({ x: centerX + Math.cos(angle) * 1200, y: centerY + Math.sin(angle) * 1200, hp: enemyHp, maxHp: enemyHp, type: type,
+    expReward: Math.round(type.exp * hpScale), vx: -Math.cos(angle) * speed, vy: -Math.sin(angle) * speed, knockX: 0, knockY: 0, slowTimer: 0 });
 }
 // 총알 발사 (다중발사면 좌우 10도씩 추가)
 function shoot() {
@@ -101,10 +129,11 @@ function updateParticles() {
 function killEnemy(enemy) {
   makeParticles(enemy.x, enemy.y, enemy.type.color, 20);
   enemies.splice(enemies.indexOf(enemy), 1);
-  exp += Math.round(enemy.type.exp * expScale); kills += 1;
+  exp += Math.round(enemy.expReward * expScale); kills += 1;
+  hp = Math.min(maxHp, hp + lifeSteal);
   const oldPhase = phase;
-  if (kills >= 40) phase = 3; else if (kills >= 20) phase = 2;
-  if (phase > oldPhase) spawnDelay = spawnDelay * phaseDelayScale;
+  phase = 1 + Math.floor(kills / 20);
+  if (phase > oldPhase) spawnDelay = Math.max(minSpawnDelay, spawnDelay * phaseDelayScale);
   if (exp >= needExp() && !paused) startLevelUp();
 }
 // 유도 (적응 사격): 범위 안에서 가장 가까운 운석 쪽으로 방향을 조금씩 틀기 (속도는 그대로)
@@ -122,8 +151,20 @@ function homeBullet(bullet) {
   bullet.angle += Math.max(-homingTurn, Math.min(homingTurn, diff));
   bullet.vx = Math.cos(bullet.angle) * speed; bullet.vy = Math.sin(bullet.angle) * speed;
 }
-// 총알 움직이고 운석 맞추기 (맞으면 파편 + 넉백, 치명타는 2배 데미지 + 흰색 파편)
+// 폭발탄: 맞은 지점 주변의 다른 운석에 데미지 1 (폭발로 죽어도 연쇄 폭발은 없음)
+function explode(blast) {
+  makeParticles(blast.x, blast.y, "#FF8800", 12);
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const enemy = enemies[i];
+    if (enemy != blast.source && Math.hypot(enemy.x - blast.x, enemy.y - blast.y) < explodeRadius + enemy.type.radius) {
+      enemy.hp -= 1; makeParticles(enemy.x, enemy.y, "#FF8800", 4);
+      if (enemy.hp <= 0) killEnemy(enemy);
+    }
+  }
+}
+// 총알 움직이고 운석 맞추기 (맞으면 파편 + 넉백 + 감속, 치명타는 2배 데미지 + 흰색 파편)
 function updateBullets() {
+  const blasts = [];
   for (let i = bullets.length - 1; i >= 0; i--) {
     const bullet = bullets[i];
     if (homingRange > 0) homeBullet(bullet);
@@ -137,6 +178,8 @@ function updateBullets() {
         enemy.hp -= crit ? damage * 2 : damage;
         enemy.knockX += Math.cos(bullet.angle) * enemy.type.knock * knockScale; enemy.knockY += Math.sin(bullet.angle) * enemy.type.knock * knockScale;
         makeParticles(bullet.x, bullet.y, crit ? "#FFFFFF" : enemy.type.color, 6);
+        enemy.slowTimer = 90;
+        if (explodeRadius > 0) blasts.push({ x: bullet.x, y: bullet.y, source: enemy });
         if (enemy.hp <= 0) killEnemy(enemy);
         if (!pierce) { used = true; break; }
       }
@@ -144,14 +187,18 @@ function updateBullets() {
     const outside = bullet.x < -100 || bullet.x > screenW + 100 || bullet.y < -100 || bullet.y > screenH + 100;
     if (used || outside) bullets.splice(i, 1);
   }
+  for (let i = 0; i < blasts.length; i++) explode(blasts[i]);
 }
-// 운석 움직이고 (넉백은 매 프레임 0.85배로 줄어듦) 플레이어와 부딪히면 HP 감소
+// 운석 움직이고 (넉백은 매 프레임 0.85배로 줄어듦, 감속 중이면 이동만 느려짐) 플레이어와 부딪히면 방어막 또는 HP 감소
 function updateEnemies() {
   for (let i = enemies.length - 1; i >= 0; i--) {
-    const enemy = enemies[i];
-    enemy.x += enemy.vx + enemy.knockX; enemy.y += enemy.vy + enemy.knockY; enemy.knockX *= 0.85; enemy.knockY *= 0.85;
+    const enemy = enemies[i], slow = enemy.slowTimer > 0 ? slowScale : 1;
+    enemy.slowTimer -= 1;
+    enemy.x += enemy.vx * slow + enemy.knockX; enemy.y += enemy.vy * slow + enemy.knockY; enemy.knockX *= 0.85; enemy.knockY *= 0.85;
     if (Math.hypot(enemy.x - centerX, enemy.y - centerY) < enemy.type.radius + 40) {
-      enemies.splice(i, 1); hp -= Math.max(1, Math.round(enemy.type.hitDamage * (1 - armor)));
+      enemies.splice(i, 1);
+      if (shieldOn) { shieldOn = false; shieldTimer = 0; makeParticles(enemy.x, enemy.y, "#66CCFF", 12); }
+      else hp -= Math.max(1, Math.round(enemy.type.hitDamage * (1 - armor)));
       if (hp <= 0) gameOver = true;
     }
   }
@@ -164,6 +211,8 @@ function update() {
   if (mouseDown && shootTimer <= 0) { shoot(); shootTimer = fireDelay; }
   spawnDelay = Math.max(minSpawnDelay, spawnDelay - delayDecrease); spawnTimer -= 1;
   if (spawnTimer <= 0) { spawnEnemy(); spawnTimer = spawnDelay; }
+  if (regen > 0 && frame % 60 == 0) hp = Math.min(maxHp, hp + regen);
+  if (shieldRecharge > 0 && !shieldOn) { shieldTimer += 1; if (shieldTimer >= shieldRecharge) { shieldOn = true; shieldTimer = 0; } }
   updateBullets(); updateEnemies(); updateParticles();
 }
 // 글자 쓰기 도우미
@@ -206,6 +255,19 @@ function drawCards() {
     drawText(perk.desc, mid, cardTop + 205, 26, "center", "#FFFFFF");
   }
 }
+// ESC 일시정지 화면: 보유한 퍼크(level > 0)를 2열로 나열
+function drawOwnedPerks() {
+  let owned = 0;
+  drawText("보유 퍼크", 960, 350, 44, "center", "#00FF00");
+  for (let i = 0; i < perks.length; i++) {
+    if (perks[i].level > 0) {
+      const text = perks[i].max == 1 ? perks[i].name + " (보유)" : perks[i].name + " Lv." + perks[i].level;
+      drawText(text, 600 + (owned % 2) * 460, 420 + Math.floor(owned / 2) * 44, 34, "left", "#FFFFFF");
+      owned += 1;
+    }
+  }
+  if (owned == 0) drawText("아직 선택한 퍼크가 없습니다", 960, 420, 34, "center", "#FFFFFF");
+}
 // 전체 화면 그리기
 function draw() {
   ctx.fillStyle = "#000000"; ctx.fillRect(0, 0, screenW, screenH);
@@ -227,12 +289,15 @@ function draw() {
   ctx.fillStyle = "#FFFFFF"; ctx.save(); ctx.translate(centerX, centerY); ctx.rotate(aimAngle);
   ctx.beginPath(); ctx.moveTo(45, 0); ctx.lineTo(-45, -36); ctx.lineTo(-45, 36); ctx.fill();
   ctx.restore();
+  // 방어막 그리기 (있을 때만 하늘색 얇은 원)
+  if (shieldOn) { ctx.strokeStyle = "#66CCFF"; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(centerX, centerY, 70, 0, Math.PI * 2); ctx.stroke(); }
   drawHud();
   if (paused) drawCards();
   if (userPaused) {
     ctx.fillStyle = "rgba(0,0,0,0.6)"; ctx.fillRect(0, 0, screenW, screenH);
-    drawText("일시정지", 960, 520, 96, "center", "#FFFFFF");
-    drawText("ESC를 눌러 계속", 960, 610, 48, "center", "#00FF00");
+    drawText("일시정지", 960, 200, 96, "center", "#FFFFFF");
+    drawText("ESC를 눌러 계속", 960, 280, 48, "center", "#00FF00");
+    drawOwnedPerks();
   }
   if (gameOver) {
     ctx.fillStyle = "rgba(0,0,0,0.7)"; ctx.fillRect(0, 0, screenW, screenH);
